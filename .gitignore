@@ -3,3 +3,13 @@ __pycache__
 .pytest_cache
 .eggs
 *.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Build directories
+build/
+dist/
