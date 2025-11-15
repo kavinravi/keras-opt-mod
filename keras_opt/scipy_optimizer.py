@@ -92,17 +92,9 @@ class ScipyOptimizer():
 
         with tf.GradientTape() as tape:
             for step, data in enumerate(iterator):
-                # Handle data unpacking with compatibility
-                try:
-                    data = data_adapter.expand_1d(data)
-                    x, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
-                except (AttributeError, TypeError):
-                    # Fallback for when data_adapter methods change
-                    if isinstance(data, tuple) and len(data) >= 2:
-                        x, y = data[0], data[1]
-                        sample_weight = data[2] if len(data) > 2 else None
-                    else:
-                        x, y, sample_weight = data, None, None
+                # Handle data unpacking - use direct calls like original code
+                data = data_adapter.expand_1d(data)
+                x, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
                 
                 y_pred = self.func(x, training=True)
                 loss = model.compiled_loss(y, y_pred, sample_weight,
@@ -229,8 +221,28 @@ class ScipyOptimizer():
 
         self._update_weights(result['x'])
         
+        # Compute metrics on final optimized model
+        model = self.model
+        dataset = iterator._dataset  # pylint:disable=protected-access
+        iterator_final = iter(dataset)
+        
         # Build return dictionary with loss
         return_dict = {'loss': result['fun']}
+        
+        # Update metrics by doing a final pass through the data
+        for data in iterator_final:
+            data = data_adapter.expand_1d(data)
+            x, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+            y_pred = self.func(x, training=False)
+            
+            # Update compiled metrics
+            model.compiled_metrics.update_state(y, y_pred, sample_weight)
+        
+        # Get metric results
+        for metric in model.metrics:
+            result_value = metric.result()
+            if result_value is not None:
+                return_dict[metric.name] = result_value
         
         return return_dict
 
