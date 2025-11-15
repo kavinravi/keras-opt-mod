@@ -1,12 +1,15 @@
 """Keras Scipy Optimizer - Full batch optimization using scipy.optimize"""
 
-__version__ = '0.0.4'
+__version__ = '0.0.5'
 
-from keras_opt import scipy_optimizer
+# Don't import scipy_optimizer at module level - let users import it explicitly
+# This avoids loading TensorFlow/Keras until actually needed
 
 def verify_fix():
     """Verify that the recursion fix is present."""
     import inspect
+    from keras_opt import scipy_optimizer
+    
     source = inspect.getsource(scipy_optimizer.ScipyOptimizer._predict)
     
     if 'model.call(' in source:
@@ -22,4 +25,3 @@ def verify_fix():
         return None
 
 __all__ = ['scipy_optimizer', 'verify_fix', '__version__']
-
