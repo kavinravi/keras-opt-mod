@@ -94,9 +94,9 @@ class ScipyOptimizer():
             for step, data in enumerate(iterator):
                 # Handle data unpacking - use direct calls like original code
                 data = data_adapter.expand_1d(data)
-                x, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+                x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
                 
-                y_pred = self.func(x, training=True)
+                y_pred = self.func(x_data, training=True)
                 loss = model.compiled_loss(y, y_pred, sample_weight,
                                            regularization_losses=model.losses)
                 progbar.update(step, [('loss', loss.numpy())])
@@ -227,23 +227,38 @@ class ScipyOptimizer():
         dataset = iterator._dataset  # pylint:disable=protected-access
         iterator_final = iter(dataset)
         
-        # Build return dictionary with loss
+        # Reset all metrics to ensure clean state
+        for metric in model.metrics:
+            metric.reset_state()
+        
+        # Build return dictionary with loss from scipy
         return_dict = {'loss': result['fun']}
         
-        # Update metrics by doing a final pass through the data
+        # Compute final loss and metrics by doing a pass through the data
+        losses = []
         for data in iterator_final:
             data = data_adapter.expand_1d(data)
-            x, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
-            y_pred = self.func(x, training=False)
+            x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+            y_pred = self.func(x_data, training=False)
+            
+            # Compute loss for this batch
+            loss = model.compiled_loss(y, y_pred, sample_weight,
+                                      regularization_losses=model.losses)
+            losses.append(loss.numpy())
             
             # Update compiled metrics
             model.compiled_metrics.update_state(y, y_pred, sample_weight)
         
-        # Get metric results
+        # Use the recomputed loss (more accurate than scipy's final value)
+        if losses:
+            return_dict['loss'] = float(np.mean(losses))
+        
+        # Get metric results (excluding loss since we already have it)
         for metric in model.metrics:
-            result_value = metric.result()
-            if result_value is not None:
-                return_dict[metric.name] = result_value
+            if metric.name != 'loss':  # Skip loss to avoid overwriting
+                result_value = metric.result()
+                if result_value is not None:
+                    return_dict[metric.name] = result_value
         
         return return_dict
 
