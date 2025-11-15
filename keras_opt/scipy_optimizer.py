@@ -125,7 +125,7 @@ class ScipyOptimizer():
         raise NotImplementedError()
         return -1, np.array([])  # pylint:disable=unreachable
 
-    def _hessp_generator(self, x, p):
+    def _hessp_generator(self, x, p, iterator):
         """ Compute Hessian-vector product for second-order optimization methods.
         
             The Hessian-vector product H*p is computed as the gradient of (grad^T * p)
@@ -134,6 +134,7 @@ class ScipyOptimizer():
             Args:
                 x: Current parameter vector (not used, weights already set by _fun_generator)
                 p: Direction vector for Hessian-vector product
+                iterator: Data iterator (not directly used, uses cached iterator from _fun_generator)
                 
             Returns:
                 Hessian-vector product as a flattened numpy array
@@ -159,11 +160,8 @@ class ScipyOptimizer():
         # Compute Hessian-vector product using nested gradient tape
         hvp_list = []
         
-        with tf.GradientTape() as outer_tape:
-            # Watch the trainable variables for the outer gradient
-            outer_tape.watch(model.trainable_variables)
-            
-            with tf.GradientTape() as inner_tape:
+        with tf.GradientTape(persistent=True, watch_accessed_variables=True) as outer_tape:
+            with tf.GradientTape(watch_accessed_variables=True) as inner_tape:
                 losses = []
                 for data in iterator:
                     data = data_adapter.expand_1d(data)
@@ -186,6 +184,9 @@ class ScipyOptimizer():
         
         # Compute gradient of (grad^T * p) - this is the Hessian-vector product
         hvp = outer_tape.gradient(grad_dot_p, model.trainable_variables)
+        
+        # Clean up the persistent tape
+        del outer_tape
         
         # Flatten the Hessian-vector product
         if hvp is None or any(h is None for h in hvp):
