@@ -36,22 +36,20 @@ class ScipyOptimizer():
         self.verbose = verbose
         self.maxiter = maxiter
         self.optimizer_kwargs = optimizer_kwargs  # Additional scipy.optimize options
-        # Use model.call instead of model.__call__ to avoid recursion
-        # model.__call__ may reference train_function, creating circular dependency
-        if model.run_eagerly:
-            self.func = model.call
-        else:
-            # experimental_relax_shapes was removed in newer TF versions
-            try:
-                self.func = tf.function(
-                    model.call, experimental_relax_shapes=True)
-            except TypeError:
-                # Newer TF versions don't have experimental_relax_shapes
-                self.func = tf.function(model.call)
         
         # Cache for Hessian computation
         self._cached_iterator = None
         self._cached_grads = None
+    
+    def _predict(self, x_data, training=True):
+        """Call model for prediction without recursion issues.
+        
+        We don't store a tf.function reference at init time because that can
+        cause circular dependencies when model.train_function is assigned later.
+        Instead, we call the model directly each time.
+        """
+        # Use the model's layers directly to avoid any train_function references
+        return self.model(x_data, training=training)
 
     def _update_weights(self, x):
         x_offset = 0
@@ -98,7 +96,7 @@ class ScipyOptimizer():
                 data = data_adapter.expand_1d(data)
                 x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
                 
-                y_pred = self.func(x_data, training=True)
+                y_pred = self._predict(x_data, training=True)
                 loss = model.compiled_loss(y, y_pred, sample_weight,
                                            regularization_losses=model.losses)
                 progbar.update(step, [('loss', loss.numpy())])
@@ -168,7 +166,7 @@ class ScipyOptimizer():
                 for data in iterator:
                     data = data_adapter.expand_1d(data)
                     x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
-                    y_pred = self.func(x_data, training=True)
+                    y_pred = self._predict(x_data, training=True)
                     loss = model.compiled_loss(y, y_pred, sample_weight,
                                              regularization_losses=model.losses)
                     losses.append(loss)
@@ -241,7 +239,7 @@ class ScipyOptimizer():
         for data in iterator_final:
             data = data_adapter.expand_1d(data)
             x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
-            y_pred = self.func(x_data, training=False)
+            y_pred = self._predict(x_data, training=False)
             
             # Compute loss for this batch
             loss = model.compiled_loss(y, y_pred, sample_weight,
