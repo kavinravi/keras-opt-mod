@@ -36,16 +36,18 @@ class ScipyOptimizer():
         self.verbose = verbose
         self.maxiter = maxiter
         self.optimizer_kwargs = optimizer_kwargs  # Additional scipy.optimize options
+        # Use model.call instead of model.__call__ to avoid recursion
+        # model.__call__ may reference train_function, creating circular dependency
         if model.run_eagerly:
-            self.func = model.__call__
+            self.func = model.call
         else:
             # experimental_relax_shapes was removed in newer TF versions
             try:
                 self.func = tf.function(
-                    model.__call__, experimental_relax_shapes=True)
+                    model.call, experimental_relax_shapes=True)
             except TypeError:
                 # Newer TF versions don't have experimental_relax_shapes
-                self.func = tf.function(model.__call__)
+                self.func = tf.function(model.call)
         
         # Cache for Hessian computation
         self._cached_iterator = None
