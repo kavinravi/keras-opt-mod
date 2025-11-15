@@ -1,6 +1,6 @@
 """Keras Scipy Optimizer - Full batch optimization using scipy.optimize"""
 
-__version__ = '0.0.2'
+__version__ = '0.0.4'
 
 from keras_opt import scipy_optimizer
 
