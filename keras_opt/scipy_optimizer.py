@@ -46,10 +46,10 @@ class ScipyOptimizer():
         
         We don't store a tf.function reference at init time because that can
         cause circular dependencies when model.train_function is assigned later.
-        Instead, we call the model directly each time.
+        Instead, we call the model's .call() method directly each time.
         """
-        # Use the model's layers directly to avoid any train_function references
-        return self.model(x_data, training=training)
+        # Use model.call() NOT model() to avoid invoking __call__ which references train_function
+        return self.model.call(x_data, training=training)
 
     def _update_weights(self, x):
         x_offset = 0
