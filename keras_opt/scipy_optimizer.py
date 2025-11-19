@@ -68,7 +68,6 @@ class ScipyOptimizer():
         """
         model = self.model
         self._update_weights(x)
-        losses = []
 
         dataset = iterator._dataset  # pylint:disable=protected-access
         assert dataset is not None
@@ -90,40 +89,51 @@ class ScipyOptimizer():
 
         progbar = keras.utils.Progbar(n_steps, verbose=self.verbose)
 
-        with tf.GradientTape() as tape:
-            for step, data in enumerate(iterator):
-                # Handle data unpacking - use direct calls like original code
-                data = data_adapter.expand_1d(data)
-                x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
-                
+        # Initialize accumulators
+        total_loss = 0.0
+        accum_grads = [tf.zeros_like(v) for v in model.trainable_variables]
+        num_batches = 0
+
+        for step, data in enumerate(iterator):
+            # Handle data unpacking - use direct calls like original code
+            data = data_adapter.expand_1d(data)
+            x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+            
+            with tf.GradientTape() as tape:
                 y_pred = self._predict(x_data, training=True)
                 loss = model.compiled_loss(y, y_pred, sample_weight,
                                            regularization_losses=model.losses)
-                progbar.update(step, [('loss', loss.numpy())])
-                losses.append(loss)
-            xloss = tf.reduce_mean(tf.stack(losses))
-            grads = tape.gradient(xloss, model.trainable_variables)
+            
+            # Compute gradients for this batch
+            grads = tape.gradient(loss, model.trainable_variables)
+            
+            # Accumulate loss and gradients
+            total_loss += loss
+            
+            for i, g in enumerate(grads):
+                if g is not None:
+                    if isinstance(g, tf.IndexedSlices):
+                        g = tf.convert_to_tensor(g)
+                    accum_grads[i] += g
+            
+            progbar.update(step, [('loss', loss.numpy())])
+            num_batches += 1
 
-        cost = xloss.numpy()
+        # Average results
+        if num_batches > 0:
+            avg_loss = total_loss / float(num_batches)
+            avg_grads = [g / float(num_batches) for g in accum_grads]
+        else:
+            avg_loss = tf.constant(0.0)
+            avg_grads = accum_grads
+
+        cost = avg_loss.numpy()
         
         # Cache gradients for Hessian computation
-        self._cached_grads = grads
+        self._cached_grads = avg_grads
 
-        if all(isinstance(x, tf.Tensor) for x in grads):
-            xgrads = np.concatenate([x.numpy().reshape(-1) for x in grads])
-            return cost, xgrads
-
-        if all(isinstance(x, tf.IndexedSlices) for x in grads):
-            xgrad_list = []
-            for var, grad in zip(model.trainable_variables, grads):
-                value = tf.Variable(np.zeros(var.shape), dtype=var.dtype)
-                value.assign_add(grad)
-                xgrad_list.append(value.numpy())
-            xgrads = np.concatenate([x.reshape(-1) for x in xgrad_list])
-            return cost, xgrads
-
-        raise NotImplementedError()
-        return -1, np.array([])  # pylint:disable=unreachable
+        xgrads = np.concatenate([x.numpy().reshape(-1) for x in avg_grads])
+        return cost, xgrads
 
     def _hessp_generator(self, x, p, iterator):
         """ Compute Hessian-vector product for second-order optimization methods.
@@ -141,8 +151,8 @@ class ScipyOptimizer():
         """
         model = self.model
         
-        if self._cached_iterator is None or self._cached_grads is None:
-            raise RuntimeError("Hessian computation requires cached gradients from function evaluation")
+        if self._cached_iterator is None:
+            raise RuntimeError("Hessian computation requires cached iterator")
         
         dataset = self._cached_iterator._dataset  # pylint:disable=protected-access
         iterator = iter(dataset)
@@ -157,43 +167,53 @@ class ScipyOptimizer():
             p_vars.append(p_var)
             p_offset += p_size
         
-        # Compute Hessian-vector product using nested gradient tape
-        hvp_list = []
-        
-        with tf.GradientTape(persistent=True, watch_accessed_variables=True) as outer_tape:
-            with tf.GradientTape(watch_accessed_variables=True) as inner_tape:
-                losses = []
-                for data in iterator:
-                    data = data_adapter.expand_1d(data)
-                    x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+        # Initialize accumulators
+        hvp_accum = [tf.zeros_like(v) for v in model.trainable_variables]
+        num_batches = 0
+
+        for data in iterator:
+            data = data_adapter.expand_1d(data)
+            x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+
+            with tf.GradientTape(persistent=True, watch_accessed_variables=True) as outer_tape:
+                with tf.GradientTape(watch_accessed_variables=True) as inner_tape:
                     y_pred = self._predict(x_data, training=True)
                     loss = model.compiled_loss(y, y_pred, sample_weight,
                                              regularization_losses=model.losses)
-                    losses.append(loss)
-                xloss = tf.reduce_mean(tf.stack(losses))
             
-            # Compute gradients with respect to trainable variables
-            grads = inner_tape.gradient(xloss, model.trainable_variables)
+                # Compute gradients with respect to trainable variables
+                grads = inner_tape.gradient(loss, model.trainable_variables)
+                
+                # Compute the dot product of gradients with direction vector p
+                grad_dot_p = tf.add_n([
+                    tf.reduce_sum(g * p_v) 
+                    for g, p_v in zip(grads, p_vars)
+                    if g is not None
+                ])
             
-            # Compute the dot product of gradients with direction vector p
-            grad_dot_p = tf.add_n([
-                tf.reduce_sum(g * p_v) 
-                for g, p_v in zip(grads, p_vars)
-                if g is not None
-            ])
+            # Compute gradient of (grad^T * p) - this is the Hessian-vector product for this batch
+            hvp_batch = outer_tape.gradient(grad_dot_p, model.trainable_variables)
+            
+            # Clean up the persistent tape
+            del outer_tape
+            
+            # Accumulate
+            for i, h in enumerate(hvp_batch):
+                if h is not None:
+                    if isinstance(h, tf.IndexedSlices):
+                        h = tf.convert_to_tensor(h)
+                    hvp_accum[i] += h
+            
+            num_batches += 1
         
-        # Compute gradient of (grad^T * p) - this is the Hessian-vector product
-        hvp = outer_tape.gradient(grad_dot_p, model.trainable_variables)
-        
-        # Clean up the persistent tape
-        del outer_tape
+        # Average results
+        if num_batches > 0:
+            avg_hvp = [h / float(num_batches) for h in hvp_accum]
+        else:
+            avg_hvp = hvp_accum
         
         # Flatten the Hessian-vector product
-        if hvp is None or any(h is None for h in hvp):
-            # If Hessian is not available, return zero vector
-            return np.zeros_like(p)
-        
-        hvp_flat = np.concatenate([h.numpy().reshape(-1) for h in hvp])
+        hvp_flat = np.concatenate([h.numpy().reshape(-1) for h in avg_hvp])
         return hvp_flat
 
     def train_function(self, iterator):
