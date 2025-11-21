@@ -1,6 +1,6 @@
 """Keras Scipy Optimizer - Full batch optimization using scipy.optimize"""
 
-__version__ = '0.0.6'
+__version__ = '0.0.7'
 
 # Don't import scipy_optimizer at module level - let users import it explicitly
 # This avoids loading TensorFlow/Keras until actually needed

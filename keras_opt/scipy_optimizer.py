@@ -89,14 +89,11 @@ class ScipyOptimizer():
 
         progbar = keras.utils.Progbar(n_steps, verbose=self.verbose)
 
-        # Initialize accumulators
-        total_loss = 0.0
-        accum_grads = [tf.zeros_like(v) for v in model.trainable_variables]
-        num_batches = 0
-
-        for step, data in enumerate(iterator):
-            # Handle data unpacking - use direct calls like original code
-            data = data_adapter.expand_1d(data)
+        # Create a tf.function for the batch update
+        @tf.function
+        def compute_batch_grads(batch_data, accum_grads):
+            # Handle data unpacking inside the graph
+            data = data_adapter.expand_1d(batch_data)
             x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
             
             with tf.GradientTape() as tape:
@@ -104,18 +101,28 @@ class ScipyOptimizer():
                 loss = model.compiled_loss(y, y_pred, sample_weight,
                                            regularization_losses=model.losses)
             
-            # Compute gradients for this batch
             grads = tape.gradient(loss, model.trainable_variables)
             
-            # Accumulate loss and gradients
-            total_loss += loss
-            
-            for i, g in enumerate(grads):
+            # Update accumulators
+            new_accum = []
+            for i, (acc, g) in enumerate(zip(accum_grads, grads)):
                 if g is not None:
                     if isinstance(g, tf.IndexedSlices):
                         g = tf.convert_to_tensor(g)
-                    accum_grads[i] += g
+                    new_accum.append(acc + g)
+                else:
+                    new_accum.append(acc)
             
+            return loss, new_accum
+
+        # Initialize accumulators
+        total_loss = 0.0
+        accum_grads = [tf.zeros_like(v) for v in model.trainable_variables]
+        num_batches = 0
+
+        for step, data in enumerate(iterator):
+            loss, accum_grads = compute_batch_grads(data, accum_grads)
+            total_loss += loss.numpy()
             progbar.update(step, [('loss', loss.numpy())])
             num_batches += 1
 
@@ -127,7 +134,7 @@ class ScipyOptimizer():
             avg_loss = tf.constant(0.0)
             avg_grads = accum_grads
 
-        cost = avg_loss.numpy()
+        cost = avg_loss
         
         # Cache gradients for Hessian computation
         self._cached_grads = avg_grads
@@ -171,8 +178,10 @@ class ScipyOptimizer():
         hvp_accum = [tf.zeros_like(v) for v in model.trainable_variables]
         num_batches = 0
 
-        for data in iterator:
-            data = data_adapter.expand_1d(data)
+        # Create a tf.function for the batch Hessian-vector product
+        @tf.function
+        def compute_batch_hvp(batch_data, accum_hvp):
+            data = data_adapter.expand_1d(batch_data)
             x_data, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
 
             with tf.GradientTape(persistent=True, watch_accessed_variables=True) as outer_tape:
@@ -194,16 +203,20 @@ class ScipyOptimizer():
             # Compute gradient of (grad^T * p) - this is the Hessian-vector product for this batch
             hvp_batch = outer_tape.gradient(grad_dot_p, model.trainable_variables)
             
-            # Clean up the persistent tape
-            del outer_tape
-            
-            # Accumulate
-            for i, h in enumerate(hvp_batch):
+            # Update accumulators
+            new_accum = []
+            for i, (acc, h) in enumerate(zip(accum_hvp, hvp_batch)):
                 if h is not None:
                     if isinstance(h, tf.IndexedSlices):
                         h = tf.convert_to_tensor(h)
-                    hvp_accum[i] += h
+                    new_accum.append(acc + h)
+                else:
+                    new_accum.append(acc)
             
+            return new_accum
+
+        for data in iterator:
+            hvp_accum = compute_batch_hvp(data, hvp_accum)
             num_batches += 1
         
         # Average results

@@ -10,4 +10,4 @@ setuptools.setup(name='keras-opt',
                      'numpy', 'tensorflow', 'scipy'
                  ],
                  python_requires='>=3.7',
-                 version='0.0.5')
+                 version='0.0.7')
