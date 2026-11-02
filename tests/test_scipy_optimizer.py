@@ -16,7 +16,7 @@ class ScipyOptimizerTest(unittest.TestCase):
 
     def setUp(self):
         np.random.seed(42)
-        tf.random.set_seed(42)
+        tf.keras.utils.set_random_seed(42)
 
     def test_basic_training(self):
         """ Test basic training on simple data.
@@ -104,26 +104,17 @@ class ScipyOptimizerTest(unittest.TestCase):
             Dense(10, activation='relu', input_dim=2),
             Dense(1)
         ])
-        model.compile(loss='mse')  # No metrics to avoid Keras 3.x compatibility issues
+        model.compile(loss='mse', metrics=['mae'])
         
         model.train_function = scipy_optimizer.make_train_function(
             model, verbose=0, maxiter=100)
         
-        # Just test that it doesn't crash with validation data
-        # Validation metrics in Keras 3.x require additional setup not covered here
-        try:
-            hist = model.fit(X_train, y_train, 
-                            validation_data=(X_test, y_test), 
-                            verbose=False)
-            self.assertTrue('loss' in hist.history)
-            self.assertLess(hist.history['loss'][-1], 0.5)
-        except ValueError as e:
-            if "Cannot get result()" in str(e):
-                # Known limitation with Keras 3.x validation metrics
-                # Test passes as long as training itself works
-                hist = model.fit(X_train, y_train, verbose=False)
-                self.assertTrue('loss' in hist.history)
-                self.assertLess(hist.history['loss'][-1], 0.5)
+        hist = model.fit(X_train, y_train,
+                         validation_data=(X_test, y_test), verbose=False)
+        self.assertLess(hist.history['loss'][-1], 0.5)
+        self.assertLess(hist.history['val_loss'][-1], 0.5)
+        self.assertIn('mae', hist.history)
+        self.assertIn('val_mae', hist.history)
 
     def test_multiple_inputs(self):
         """ Test model with multiple inputs.
